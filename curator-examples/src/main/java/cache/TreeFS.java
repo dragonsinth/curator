@@ -194,7 +194,7 @@ public final class TreeFS
 //            }
 //            cache = new TreeCache(usingNamespace, "", false);
 
-            cache = new TreeCache(client, rootPath, false);
+            cache = TreeCache.newBuilder(client, rootPath).setCacheData(false).build();
             final boolean isVerbose = verbose;
             final boolean shouldExit = exit;
             cache.getListenable().addListener(new TreeCacheListener()
@@ -276,7 +276,7 @@ public final class TreeFS
                             assert result;
                         }
 
-                        if ( data.getData().length > 0 || !isDirectory )
+                        if ( nonEmptyData(data) || !isDirectory )
                         {
                             File outFile = isDirectory ? dataFile : file;
                             FileOutputStream fileOutputStream = new FileOutputStream(outFile);
@@ -323,5 +323,9 @@ public final class TreeFS
             CloseableUtils.closeQuietly(client);
             DirectoryUtils.deleteDirectoryContents(outDir);
         }
+    }
+
+    private static boolean nonEmptyData(ChildData data) {
+        return data.getData() != null && data.getData().length > 0;
     }
 }
