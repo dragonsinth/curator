@@ -30,15 +30,19 @@ import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.test.DirectoryUtils;
 import org.apache.curator.utils.CloseableUtils;
 import org.apache.curator.utils.PathUtils;
-import org.apache.zookeeper.data.Stat;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
 import java.util.Iterator;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
- * An example of the TreeCache.  Mirrors the given ZK subtree into the current directly.
+ * An example of using TreeCache.  Mirrors the given ZK subtree onto the file system.
  */
 public final class TreeFS
 {
@@ -200,7 +204,15 @@ public final class TreeFS
             cache.getListenable().addListener(new TreeCacheListener()
             {
                 @Override
-                public void childEvent(CuratorFramework client, TreeCacheEvent event) throws Exception
+                public void childEvent(CuratorFramework client, TreeCacheEvent event) {
+                    try {
+                        processChildEvent(event);
+                    } catch (Exception e) {
+                        e.printStackTrace(System.err);
+                    }
+                }
+
+                private void processChildEvent(TreeCacheEvent event) throws Exception
                 {
                     if ( event.getType() == TreeCacheEvent.Type.INITIALIZED && shouldExit )
                     {
@@ -226,41 +238,35 @@ public final class TreeFS
                         System.out.println(String.format("%s %s", event.getType(), event.getData().getPath()));
                     }
 
-                    assert data.getPath().startsWith("/");
+                    checkState(data.getPath().startsWith("/"));
                     String path = data.getPath().substring(1);
-                    Stat stat = data.getStat();
-                    File file = new File(rootDir, path);
-
-                    boolean isDirectory = stat.getNumChildren() > 0;
+                    boolean isRoot = path.isEmpty();
+                    File file = isRoot ? rootDir : new File(rootDir, path);
                     File dataFile = new File(file, "zookeeper");
-
-                    boolean result;
 
                     // Disjoint add/update logic
                     switch ( event.getType() )
                     {
                     case NODE_ADDED:
-                        assert !file.exists();
+                        checkState(!file.exists() || isRoot, file);
                         break;
 
                     case NODE_UPDATED:
+                        boolean isDirectory = data.getStat().getNumChildren() > 0;
                         if ( file.isDirectory() && !isDirectory )
                         {
                             // Convert directory to normal file
                             if ( dataFile.exists() )
                             {
-                                result = dataFile.delete();
-                                assert result;
+                                Files.delete(dataFile.toPath());
                             }
-                            result = file.delete();
-                            assert result;
+                            Files.delete(file.toPath());
                         }
 
                         if ( !file.isDirectory() && isDirectory )
                         {
                             // Convert normal file to directory
-                            result = file.delete();
-                            assert result;
+                            Files.delete(file.toPath());
                         }
                         break;
                     }
@@ -270,10 +276,15 @@ public final class TreeFS
                     {
                     case NODE_ADDED:
                     case NODE_UPDATED:
-                        if ( isDirectory )
+                        if (!isRoot) {
+                            // Walk from the root down to the immediate parent, forcing directories.
+                            ensureDirectories(file.getParentFile(), rootDir);
+                        }
+
+                        boolean isDirectory = data.getStat().getNumChildren() > 0;
+                        if ( isDirectory && !isRoot )
                         {
-                            result = file.mkdir();
-                            assert result;
+                            Files.createDirectory(file.toPath());
                         }
 
                         if ( nonEmptyData(data) || !isDirectory )
@@ -282,29 +293,24 @@ public final class TreeFS
                             FileOutputStream fileOutputStream = new FileOutputStream(outFile);
                             try
                             {
-                                fileOutputStream.write(data.getData());
-                            }
-                            catch ( IOException e )
-                            {
-                                e.printStackTrace(System.err);
+                                if (nonEmptyData(data)) {
+                                    fileOutputStream.write(data.getData());
+                                }
                             }
                             finally
                             {
                                 CloseableUtils.closeQuietly(fileOutputStream);
                             }
-                            result = outFile.setLastModified(stat.getMtime());
-                            assert result;
+                            Files.setLastModifiedTime(outFile.toPath(), FileTime.fromMillis(data.getStat().getMtime()));
                         }
                         break;
 
                     case NODE_REMOVED:
                         if ( dataFile.exists() )
                         {
-                            result = dataFile.delete();
-                            assert result;
+                            Files.delete(dataFile.toPath());
                         }
-                        result = file.delete();
-                        assert result;
+                        Files.delete(file.toPath());
                         break;
                     }
                 }
@@ -323,6 +329,24 @@ public final class TreeFS
             CloseableUtils.closeQuietly(client);
             DirectoryUtils.deleteDirectoryContents(outDir);
         }
+    }
+
+    private static void ensureDirectories(File parent, File rootDir) throws IOException {
+        if (!parent.equals(rootDir)) {
+            ensureDirectories(parent.getParentFile(), rootDir);
+            Path parentPath = parent.toPath();
+            if (parent.isFile()) {
+                if (parent.length() == 0) {
+                    Files.delete(parentPath);
+                } else {
+                    Files.move(parentPath, parentPath.getParent().resolve("zookeeper"));
+                }
+            }
+            if (!parent.exists()) {
+                Files.createDirectory(parentPath);
+            }
+        }
+        checkState(parent.isDirectory());
     }
 
     private static boolean nonEmptyData(ChildData data) {
